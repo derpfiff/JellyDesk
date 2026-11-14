@@ -1,0 +1,10 @@
+# Wird mit "xcodegen generate" aus project.yml erzeugt
+*.xcodeproj
+DerivedData/
+.build/
+.DS_Store
+xcuserdata/
+build/
+
+# Lokale Signatur und Bundle-ID
+Config/Local.xcconfig

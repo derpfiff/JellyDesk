@@ -1,0 +1,11 @@
+// Vorlage: nach Config/Local.xcconfig kopieren und anpassen.
+//
+// Mit einem festen Zertifikat bleibt die Signatur über Builds hinweg gleich.
+// Dann fragt der Schlüsselbund nicht nach jedem neuen Build erneut nach.
+
+// CODE_SIGN_IDENTITY = Apple Development
+// DEVELOPMENT_TEAM = ABCDE12345
+
+// Eigene Bundle-ID. Sie bestimmt auch den Ordner der Offline-Mediathek
+// (~/Library/Containers/<Bundle-ID>/…) und den Dienstnamen im Schlüsselbund.
+// PRODUCT_BUNDLE_IDENTIFIER = com.example.JellyDesk

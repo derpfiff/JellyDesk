@@ -1,0 +1,15 @@
+// Vorgaben für alle Builds.
+//
+// Eigene Werte (Signatur mit Entwicklerkonto, eigene Bundle-ID) gehören in
+// Config/Local.xcconfig. Die Datei wird nicht eingecheckt; eine Vorlage liegt
+// in Config/Local.example.xcconfig.
+
+PRODUCT_BUNDLE_IDENTIFIER = io.github.derpfiff.JellyDesk
+
+// Ohne Entwicklerkonto: lokal signieren ("Sign to Run Locally").
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+PROVISIONING_PROFILE_SPECIFIER =
+
+#include? "Local.xcconfig"
