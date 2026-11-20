@@ -37,19 +37,5 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>JellyDesk verbindet sich mit deinem Jellyfin-Server im Heimnetz, um die Mediathek zu zeigen, Titel herunterzuladen und den Wiedergabestand abzugleichen.</string>
-	<!-- Sparkle: Automatische Updates (docs/UPDATES.md). -->
-	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/derpfiff/JellyDesk/main/appcast.xml</string>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
-	<key>SUScheduledCheckInterval</key>
-	<integer>86400</integer>
-	<key>SUEnableInstallerLauncherService</key>
-	<true/>
-	<!-- Vor der ersten echten Veröffentlichung mit Sparkles `generate_keys` einen EdDSA-Schlüssel
-	     erzeugen und den öffentlichen Teil hier eintragen; ohne gültigen Schlüssel schlägt die
-	     Signaturprüfung bei jedem Update fehl. -->
-	<key>SUPublicEDKey</key>
-	<string></string>
 </dict>
 </plist>

@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // stammen, etwa das Vollbildfenster der Web-Ansicht mit seiner Titelzeile.
         NSApp.appearance = NSAppearance(named: .darkAqua)
         AppServices.shared.start()
+        UpdateChecker.shared.checkInBackgroundIfDue()
     }
 
     /// Downloads laufen weiter, wenn das Fenster geschlossen ist.
@@ -44,7 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct JellyDeskApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     private let services = AppServices.shared
-    @StateObject private var updater = UpdaterService.shared
+    @StateObject private var updateChecker = UpdateChecker.shared
 
     var body: some Scene {
         Window("JellyDesk", id: "main") {
@@ -62,12 +63,11 @@ struct JellyDeskApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
             SidebarCommands()
-            // „Nach Updates suchen …“ sitzt wie in anderen Mac-Apps unter dem App-Menü neben
-            // „Über JellyDesk“. Sparkle meldet selbst zurück, wenn es gerade nicht prüfen kann
-            // (z. B. weil schon ein Update heruntergeladen wird).
+            // „Nach Updates suchen …“ fragt die GitHub-Releases-API an und zeigt bei einem Fund
+            // einen Hinweis mit dem Link zur Release-Seite.
             CommandGroup(after: .appInfo) {
-                Button("Nach Updates suchen …") { updater.checkForUpdates() }
-                    .disabled(!updater.canCheckForUpdates)
+                Button("Nach Updates suchen …") { updateChecker.checkInteractively() }
+                    .disabled(updateChecker.isChecking)
             }
             CommandGroup(after: .toolbar) {
                 Button("Seite neu laden") { services.web.reload() }
