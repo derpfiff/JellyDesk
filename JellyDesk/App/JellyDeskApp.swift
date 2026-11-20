@@ -44,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct JellyDeskApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     private let services = AppServices.shared
+    @StateObject private var updater = UpdaterService.shared
 
     var body: some Scene {
         Window("JellyDesk", id: "main") {
@@ -61,6 +62,13 @@ struct JellyDeskApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
             SidebarCommands()
+            // „Nach Updates suchen …“ sitzt wie in anderen Mac-Apps unter dem App-Menü neben
+            // „Über JellyDesk“. Sparkle meldet selbst zurück, wenn es gerade nicht prüfen kann
+            // (z. B. weil schon ein Update heruntergeladen wird).
+            CommandGroup(after: .appInfo) {
+                Button("Nach Updates suchen …") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
+            }
             CommandGroup(after: .toolbar) {
                 Button("Seite neu laden") { services.web.reload() }
                     .keyboardShortcut("r", modifiers: .command)

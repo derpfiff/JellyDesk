@@ -24,6 +24,7 @@ Ein nativer macOS-Client für [Jellyfin](https://jellyfin.org). Er zeigt die Web
 - **Vorspann wie auf dem Server**: Die App liest die Einstellungen des Plugins „Local Intros“, lädt dessen Intros einmalig und wählt vor jedem Start nach derselben Regel wie das Plugin.
 - **Abgleich des Wiedergabestands**: Offline Gesehenes wird gemeldet, sobald der Server wieder erreichbar ist. Ist der Stand auf dem Server neuer, gilt der.
 - **Bewertung nach dem Film**: Läuft ein Film im eigenen Player zu Ende oder wird ab etwa 90 % geschlossen, erscheint ein Sheet mit halben Sternen, Herz, Datum, „Schon mal gesehen“ und einem Kommentarfeld. Funktioniert auch offline: die Antwort überlebt einen Neustart und geht bei der nächsten Verbindung zum Server als Bewertung, Entdecken-Rückmeldung und – falls dort eingerichtet – Letterboxd-Eintrag raus. Das Sheet folgt der Systemsprache (Deutsch, sonst Englisch).
+- **Automatische Updates** über [Sparkle](https://sparkle-project.org): die App prüft einmal am Tag, ob ein neuer Build vorliegt, und bietet ihn über den vertrauten Sparkle-Dialog an. Manuell geht es über „JellyDesk → Nach Updates suchen …“. Siehe [`docs/UPDATES.md`](docs/UPDATES.md) für den Veröffentlichungsablauf.
 
 ## Voraussetzungen
 

@@ -8,5 +8,13 @@
 	<true/>
 	<key>com.apple.security.files.downloads.read-write</key>
 	<true/>
+	<!-- Sparkle (Sandbox-Modus): die Hilfsdienste zum Herunterladen und Installieren von Updates
+	     laufen in XPC-Diensten des eingebundenen Sparkle-Pakets und werden per Mach-Namen
+	     angesprochen. Ohne diese Ausnahme verweigert die Sandbox die Verbindung. -->
+	<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+	<array>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER)-spks</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER)-spki</string>
+	</array>
 </dict>
 </plist>

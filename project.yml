@@ -11,14 +11,17 @@ packages:
   MPVKit:
     url: https://github.com/mpvkit/MPVKit.git
     from: 1.0.0
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.6.0
 
 settings:
   base:
     # "5.0" ist der Sprachmodus Swift 5 (gilt für alle 5.x-Compiler, also auch 5.10).
     SWIFT_VERSION: "5.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
-    MARKETING_VERSION: "1.1.0"
-    CURRENT_PROJECT_VERSION: "2"
+    MARKETING_VERSION: "1.2.0"
+    CURRENT_PROJECT_VERSION: "3"
 
 targets:
   JellyDesk:
@@ -29,6 +32,8 @@ targets:
     dependencies:
       - package: MPVKit
         product: MPVKit
+      - package: Sparkle
+        product: Sparkle
     # Bundle-ID und Signatur stehen in Config/Base.xcconfig und lassen sich in
     # Config/Local.xcconfig (nicht eingecheckt) überschreiben.
     configFiles:
