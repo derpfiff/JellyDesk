@@ -35,6 +35,9 @@ final class PlayerViewModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     /// Vorschaubilder für die Zeitleiste, sofern es für den Titel welche gibt.
     @Published private(set) var trickplay: TrickplayProvider?
+    /// Für den gerade laufenden Film liegt eine Bewertungs-Frage vor; die Oberfläche zeigt
+    /// dann das Sheet. Wird gesetzt, sobald der Film zu Ende ist oder ~90 % erreicht wurden.
+    @Published var pendingRatingPrompt: RatingContext?
     @Published var volume: Double {
         didSet {
             engine?.volume = volume
@@ -48,6 +51,11 @@ final class PlayerViewModel: ObservableObject {
     private let intros: IntroLibrary
     private let api: JellyfinAPIService
     private let streams: StreamSessions
+    private let ratings: RatingStore
+    private let credentials: CredentialStore
+
+    /// Für den aktuell laufenden Hauptfilm schon einmal angeboten; verhindert doppelte Sheets.
+    private var ratingOffered = false
 
     /// Auftrag der Weboberfläche; nil bei einem Download.
     private var stream: StreamRequest?
@@ -76,13 +84,15 @@ final class PlayerViewModel: ObservableObject {
     private var closed = false
 
     init(itemID: String, store: OfflineStore, sync: ProgressSyncService, intros: IntroLibrary,
-         api: JellyfinAPIService, streams: StreamSessions) {
+         api: JellyfinAPIService, streams: StreamSessions, ratings: RatingStore, credentials: CredentialStore) {
         self.intros = intros
         self.api = api
         self.streams = streams
         self.itemID = itemID
         self.store = store
         self.sync = sync
+        self.ratings = ratings
+        self.credentials = credentials
         self.volume = UserDefaults.standard.double(forKey: SettingsKeys.playerVolume)
     }
 
@@ -252,6 +262,9 @@ final class PlayerViewModel: ObservableObject {
         lastReportedPause = nil
         trickplay = nil
         streamLoad += 1
+        // Neuer Titel: ein etwaiges vorheriges Sheet gilt nicht mehr.
+        ratingOffered = false
+        pendingRatingPrompt = nil
         let number = streamLoad
         let item = stream.items[index]
         let isFirstMain = index == firstMainIndex
@@ -400,6 +413,12 @@ final class PlayerViewModel: ObservableObject {
         guard let engine, isLoaded, !isIntro else { return }
         if stream != nil {
             reportStream(.progress)
+            // Für Streams gibt es keinen lokalen Gesehen-Stand; „gesehen“ führt der Server.
+            // Trotzdem hier prüfen, ob die 90-%-Schwelle das Sheet auslöst.
+            if let total = engine.duration as TimeInterval?, total > 0,
+               engine.position.isFinite, engine.position / total > 0.9 {
+                maybeOfferRating()
+            }
             return
         }
         let total = engine.duration
@@ -407,9 +426,10 @@ final class PlayerViewModel: ObservableObject {
         guard total > 0, current.isFinite else { return }
 
         let ticks = Ticks.from(seconds: current)
+        let watched = current / total > 0.9
+        if watched { maybeOfferRating() }
         guard ticks != lastSavedTicks else { return }   // nichts Neues, z. B. pausiert
         lastSavedTicks = ticks
-        let watched = current / total > 0.9
 
         store.update(itemID) {
             if watched {
@@ -424,6 +444,103 @@ final class PlayerViewModel: ObservableObject {
             $0.positionUpdatedAt = Date()
             $0.needsSync = true
         }
+    }
+
+    // MARK: Bewertung
+
+    /// Prüft, ob für den aktuell laufenden Hauptfilm das Sheet gezeigt werden soll,
+    /// und setzt `pendingRatingPrompt` entsprechend. Darf mehrfach aufgerufen werden;
+    /// schlägt nach einem Treffer je Wiedergabe-Sitzung nicht noch einmal an.
+    private func maybeOfferRating() {
+        guard !ratingOffered, !isIntro, pendingRatingPrompt == nil else { return }
+
+        // Nur Filme, keine Folgen, kein Mediathek-/Kanal-Titel.
+        if let stream, streamIndex < stream.items.count {
+            let item = stream.items[streamIndex]
+            guard item.itemType == "Movie", !item.isIntro, streamSource?.remoteURL == nil else { return }
+            let credentialRef = credentials.upsert(serverId: stream.serverId, serverUrl: stream.serverUrl,
+                                                   userId: stream.userId, accessToken: stream.accessToken)
+            // Darf laut Server-Einstellung gefragt werden? Fehlt der Stand, trotzdem fragen.
+            if let cache = ratings.ratePromptCache(for: stream.serverUrl), cache.ratePrompt == false { return }
+            let askedCache = ratings.askedCache(server: stream.serverUrl, userId: stream.userId)
+            if askedCache.off || askedCache.isAsked(item.itemId) { return }
+            if ratings.hasPending(itemId: item.itemId, userId: stream.userId, server: stream.serverUrl) { return }
+
+            ratingOffered = true
+            var context = RatingContext(itemId: item.itemId, tmdbId: nil, serverId: stream.serverId,
+                                        serverUrl: stream.serverUrl, credentialRef: credentialRef,
+                                        userId: stream.userId, title: item.title, year: item.year)
+            pendingRatingPrompt = context
+            // TMDb-Kennung online nachziehen; bei Erfolg Sheet-Kontext ergänzen.
+            let api = self.api, server = stream.serverUrl, userId = stream.userId, token = stream.accessToken
+            Task { [weak self] in
+                let providers = await api.providerIds(server: server, itemId: item.itemId, userId: userId, token: token)
+                if let tmdb = providers["Tmdb"].flatMap(Int.init) {
+                    context.tmdbId = tmdb
+                    await MainActor.run {
+                        guard let self, self.pendingRatingPrompt?.itemId == item.itemId else { return }
+                        self.pendingRatingPrompt = context
+                    }
+                }
+            }
+            return
+        }
+
+        guard let item = store.item(itemID), item.itemType == "Movie" else { return }
+        if let cache = ratings.ratePromptCache(for: item.serverUrl), cache.ratePrompt == false { return }
+        guard let credential = credentials.credential(ref: item.credentialRef) else { return }
+        let askedCache = ratings.askedCache(server: item.serverUrl, userId: credential.userId)
+        if askedCache.off || askedCache.isAsked(item.itemId) { return }
+        if ratings.hasPending(itemId: item.itemId, userId: credential.userId, server: item.serverUrl) { return }
+
+        ratingOffered = true
+        pendingRatingPrompt = RatingContext(
+            itemId: item.itemId, tmdbId: item.tmdbId, serverId: item.serverId,
+            serverUrl: item.serverUrl, credentialRef: item.credentialRef,
+            userId: credential.userId, title: item.title, year: item.year)
+    }
+
+    private func enqueue(_ action: PendingRating.Action, draft: RatingDraft?) {
+        guard let context = pendingRatingPrompt else { return }
+        let dateString = draft?.watchedDate.map { Self.formatDate($0) } ?? nil
+        let entry = PendingRating(
+            id: UUID().uuidString,
+            itemId: context.itemId,
+            tmdbId: context.tmdbId,
+            serverId: context.serverId,
+            serverUrlString: context.serverUrl.absoluteString,
+            credentialRef: context.credentialRef,
+            userId: context.userId,
+            action: action,
+            stars: draft?.stars,
+            liked: draft?.liked ?? false,
+            watchedDate: dateString,
+            comment: draft?.comment ?? "",
+            containsSpoilers: draft?.containsSpoilers ?? false,
+            rewatch: draft?.rewatch ?? false,
+            createdAt: Date()
+        )
+        ratings.enqueue(entry)
+        ratings.markAskedLocally(itemId: context.itemId, server: context.serverUrl,
+                                 userId: context.userId, off: action == .off)
+        pendingRatingPrompt = nil
+        sync.syncSoon()
+    }
+
+    func submitRating(_ draft: RatingDraft) { enqueue(.save, draft: draft) }
+    func postponeRating() { enqueue(.later, draft: nil) }
+    func disableRatingPrompt() { enqueue(.off, draft: nil) }
+    /// Sheet ohne Wahl geschlossen (z. B. Fenster weg): Id NICHT eintragen, damit Cinema Glass
+    /// das nächste Mal online von selbst fragt.
+    func dismissRatingSheet() { pendingRatingPrompt = nil }
+
+    private static func formatDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
     }
 
     // MARK: Bedienung
@@ -632,7 +749,15 @@ extension PlayerViewModel: PlayerEngineDelegate {
         if stream != nil {
             // Das Ende gilt dem Server als gesehen; danach folgt der nächste Titel der Warteschlange.
             reportStream(.stopped, position: engine.duration)
-            playStream(at: streamIndex + 1)
+            // Für Filme ohne Mediathek-/Kanal-Herkunft die Bewertungs-Frage anbieten, bevor der
+            // nächste Titel startet.
+            maybeOfferRating()
+            if pendingRatingPrompt == nil {
+                playStream(at: streamIndex + 1)
+            } else {
+                // Warten, bis das Sheet geschlossen ist; der Nutzer kann dann weiterschauen oder das Fenster schließen.
+                self.engine?.pause()
+            }
             return
         }
         if isIntro {
@@ -641,6 +766,7 @@ extension PlayerViewModel: PlayerEngineDelegate {
         }
         position = engine.duration
         saveProgress()
+        maybeOfferRating()
         engine.pause()
     }
 

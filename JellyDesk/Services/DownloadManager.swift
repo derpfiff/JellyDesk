@@ -31,6 +31,7 @@ final class DownloadManager: ObservableObject {
     /// Für die Vorschaubilder der Zeitleiste; wird von AppServices gesetzt.
     var api: JellyfinAPIService?
     private var trickplayRunning: Set<String> = []
+    private var providerIdsRunning: Set<String> = []
 
     private let sessionDelegate = DownloadSessionDelegate()
     private var session: URLSession!
@@ -164,6 +165,7 @@ final class DownloadManager: ObservableObject {
         store.add(item)
         fetchArtwork(for: id)
         fetchTrickplay(for: id)
+        if request.itemType == "Movie" { fetchProviderIds(for: id) }
         if let introLibrary { Task { await introLibrary.prepare(itemID: id) } }
         schedule()
     }
@@ -449,6 +451,10 @@ final class DownloadManager: ObservableObject {
         }
         // Auch ältere Downloads bekommen ihre Vorschaubilder nachgereicht.
         for item in store.items where item.trickplay == nil { fetchTrickplay(for: item.id) }
+        // ProviderIds für Filme, die noch keine TMDb-Kennung haben (z. B. ältere Downloads).
+        for item in store.items where item.itemType == "Movie" && item.tmdbId == nil && item.providerIdsChecked != true {
+            fetchProviderIds(for: item.id)
+        }
         introLibrary?.refreshAll()
         schedule()
     }
@@ -566,6 +572,30 @@ final class DownloadManager: ObservableObject {
                 self.store.update(id) {
                     $0.trickplay = info
                     $0.trickplayChecked = true
+                }
+            }
+        }
+    }
+
+    // MARK: TMDb-Kennung (für die Bewertungs-Frage)
+
+    /// Fragt einmalig die ProviderIds eines Films beim Server ab und legt die TMDb-Kennung ins
+    /// `OfflineItem`. Ohne Treffer wird `providerIdsChecked` gesetzt, damit nicht wiederholt
+    /// nachgefragt wird.
+    private func fetchProviderIds(for id: String) {
+        guard let api, !providerIdsRunning.contains(id), let item = store.item(id),
+              item.itemType == "Movie", item.tmdbId == nil, item.providerIdsChecked != true,
+              let credential = credentials.credential(ref: item.credentialRef) else { return }
+        providerIdsRunning.insert(id)
+        let server = item.serverUrl, itemId = item.itemId, userId = credential.userId, token = credential.accessToken
+        Task { [weak self] in
+            let providers = await api.providerIds(server: server, itemId: itemId, userId: userId, token: token)
+            await MainActor.run {
+                guard let self else { return }
+                self.providerIdsRunning.remove(id)
+                self.store.update(id) {
+                    if let s = providers["Tmdb"], let n = Int(s) { $0.tmdbId = n }
+                    $0.providerIdsChecked = true
                 }
             }
         }

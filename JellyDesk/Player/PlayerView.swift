@@ -49,8 +49,9 @@ private struct PlayerScreen: View {
     @State private var showSubtitleMenu = false
 
     init(itemID: String, services: AppServices) {
-        _model = StateObject(wrappedValue: PlayerViewModel(itemID: itemID, store: services.store, sync: services.sync, intros: services.intros,
-                                                               api: services.api, streams: services.streams))
+        _model = StateObject(wrappedValue: PlayerViewModel(itemID: itemID, store: services.store, sync: services.sync,
+                                                           intros: services.intros, api: services.api, streams: services.streams,
+                                                           ratings: services.ratings, credentials: services.credentials))
     }
 
     private var overlayVisible: Bool {
@@ -118,6 +119,17 @@ private struct PlayerScreen: View {
         .onDisappear {
             hideTask?.cancel()
             model.close()
+        }
+        .sheet(item: $model.pendingRatingPrompt) { context in
+            RatingSheet(
+                context: context,
+                letterboxdAvailable: true,
+                onSave: { draft in model.submitRating(draft) },
+                onLater: { model.postponeRating() },
+                onDisableForever: { model.disableRatingPrompt() },
+                onDismiss: { }
+            )
+            .preferredColorScheme(.dark)
         }
     }
 

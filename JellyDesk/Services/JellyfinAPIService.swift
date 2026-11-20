@@ -380,6 +380,157 @@ actor JellyfinAPIService {
         _ = try? await send(request(server: server, path: kind.rawValue, method: "POST", token: token, json: body))
     }
 
+    // MARK: Bewertungen (Cinema Glass + Jellyscribe)
+
+    /// GET /CinemaGlass/config – anonym. nil, wenn der Server das Plugin nicht hat oder
+    /// nicht erreichbar ist. Steht in `ratePrompt` nichts, gilt true (nachfragen).
+    func cinemaGlassRatePrompt(server: URL) async -> Bool? {
+        guard let data = try? await send(request(server: server, path: "CinemaGlass/config")),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return (root["ratePrompt"] as? Bool) ?? true
+    }
+
+    /// Zusammengefasster Stand der gemeinsamen „Schon gefragt“-Liste.
+    struct CinemaGlassAskedSummary: Sendable {
+        var asked: [String]
+        var off: Bool
+    }
+
+    /// Nur lesen: GET /DisplayPreferences/cinemaglass-rate?userId=…&client=cinemaglass
+    func cinemaGlassAskedSummary(server: URL, userId: String, token: String) async throws -> CinemaGlassAskedSummary {
+        let data = try await send(request(server: server, path: "DisplayPreferences/cinemaglass-rate",
+                                          query: [URLQueryItem(name: "userId", value: userId),
+                                                  URLQueryItem(name: "client", value: "cinemaglass")],
+                                          token: token))
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIError.invalidResponse
+        }
+        let prefs = object["CustomPrefs"] as? [String: Any] ?? [:]
+        let askedString = prefs["asked"] as? String ?? "[]"
+        let ids = ((try? JSONSerialization.jsonObject(with: Data(askedString.utf8))) as? [String]) ?? []
+        let off = (prefs["off"] as? String) == "1"
+        return CinemaGlassAskedSummary(asked: ids, off: off)
+    }
+
+    /// Hängt die (normalisierten) Jellyfin-Kennungen an `CustomPrefs.asked`, kürzt auf 300,
+    /// setzt bei `disableForever` zusätzlich `CustomPrefs.off = "1"`, und schreibt das ganze
+    /// DisplayPreferences-Objekt zurück. Vorher wird es frisch gelesen, damit Einträge anderer
+    /// Geräte erhalten bleiben. Liefert den neuen Stand, damit die App ihn zwischenspeichern kann.
+    func appendCinemaGlassAsked(server: URL, userId: String, token: String,
+                                itemIds: [String], disableForever: Bool) async throws -> CinemaGlassAskedSummary {
+        let data = try await send(request(server: server, path: "DisplayPreferences/cinemaglass-rate",
+                                          query: [URLQueryItem(name: "userId", value: userId),
+                                                  URLQueryItem(name: "client", value: "cinemaglass")],
+                                          token: token))
+        guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIError.invalidResponse
+        }
+        var prefs = (object["CustomPrefs"] as? [String: Any]) ?? [:]
+        let askedString = prefs["asked"] as? String ?? "[]"
+        var ids = ((try? JSONSerialization.jsonObject(with: Data(askedString.utf8))) as? [String]) ?? []
+        for raw in itemIds {
+            let normalized = raw.replacingOccurrences(of: "-", with: "").lowercased()
+            guard !normalized.isEmpty else { continue }
+            ids.removeAll { $0 == normalized }
+            ids.append(normalized)
+        }
+        if ids.count > 300 { ids.removeFirst(ids.count - 300) }
+        let encoded = try JSONSerialization.data(withJSONObject: ids)
+        prefs["asked"] = String(data: encoded, encoding: .utf8) ?? "[]"
+        if disableForever { prefs["off"] = "1" }
+        let currentOff = (prefs["off"] as? String) == "1"
+        object["CustomPrefs"] = prefs
+        _ = try await send(request(server: server, path: "DisplayPreferences/cinemaglass-rate",
+                                   query: [URLQueryItem(name: "userId", value: userId),
+                                           URLQueryItem(name: "client", value: "cinemaglass")],
+                                   method: "POST", token: token, json: object))
+        return CinemaGlassAskedSummary(asked: ids, off: currentOff)
+    }
+
+    /// POST /UserItems/{itemId}/UserData?userId=… mit nur den angegebenen Feldern.
+    /// Rating ist 1–10 (halbe Sterne = ungerade Werte). `liked` entspricht dem Herz des Sheets.
+    func postUserRating(server: URL, endpoints: Endpoints, itemId: String, userId: String, token: String,
+                        rating: Int?, liked: Bool) async throws {
+        let (path, query) = userDataRoute(endpoints, itemId: itemId, userId: userId)
+        var body: [String: Any] = ["Likes": liked]
+        if let rating { body["Rating"] = rating }
+        _ = try await send(request(server: server, path: path, query: query, method: "POST", token: token, json: body))
+    }
+
+    /// POST /CinemaGlass/discover/feedback – Fehler werden absichtlich ignoriert.
+    func postDiscoverFeedback(server: URL, token: String, tmdbId: Int, action: String) async {
+        let body: [String: Any] = [
+            "source": "detail",
+            "items": [["key": "movie:\(tmdbId)", "action": action]],
+        ]
+        _ = try? await send(request(server: server, path: "CinemaGlass/discover/feedback",
+                                    method: "POST", token: token, json: body))
+    }
+
+    struct LetterboxdStatus: Sendable {
+        var enabled: Bool
+        var configured: Bool
+    }
+
+    /// GET /LetterboxdLog/Status
+    func letterboxdStatus(server: URL, token: String) async throws -> LetterboxdStatus {
+        let data = try await send(request(server: server, path: "LetterboxdLog/Status", token: token))
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIError.invalidResponse
+        }
+        return LetterboxdStatus(enabled: (object["enabled"] as? Bool) ?? false,
+                                configured: (object["configured"] as? Bool) ?? false)
+    }
+
+    enum LetterboxdPostResult: Sendable {
+        case posted
+        case queued
+        case error(String)
+    }
+
+    /// POST /LetterboxdLog/Entry – der Server aktualisiert statt zu verdoppeln, ein erneutes
+    /// Senden ist also harmlos.
+    func postLetterboxdEntry(server: URL, token: String, itemId: String, tmdbId: Int,
+                             watchedDate: String?, rating: Double?, liked: Bool,
+                             review: String, containsSpoilers: Bool, rewatch: Bool) async throws -> LetterboxdPostResult {
+        var body: [String: Any] = [
+            "itemId": itemId,
+            "tmdbId": tmdbId,
+            "liked": liked,
+            "review": review,
+            "containsSpoilers": containsSpoilers,
+            "rewatch": rewatch,
+        ]
+        body["watchedDate"] = watchedDate ?? NSNull()
+        body["rating"] = rating ?? NSNull()
+        let data = try await send(request(server: server, path: "LetterboxdLog/Entry",
+                                          method: "POST", token: token, json: body))
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIError.invalidResponse
+        }
+        let status = (object["status"] as? String) ?? "error"
+        switch status {
+        case "posted": return .posted
+        case "queued": return .queued
+        default: return .error((object["message"] as? String) ?? "Unbekannter Fehler")
+        }
+    }
+
+    /// GET /Items/{itemId}?userId=…&fields=ProviderIds. Liefert alle ProviderIds als Zeichenketten;
+    /// fehlen sie, ein leeres Wörterbuch.
+    func providerIds(server: URL, itemId: String, userId: String, token: String) async -> [String: String] {
+        let query = [URLQueryItem(name: "userId", value: userId), URLQueryItem(name: "fields", value: "ProviderIds")]
+        guard let data = try? await send(request(server: server, path: "Items/\(itemId)", query: query, token: token)),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let providers = object["ProviderIds"] as? [String: Any] else { return [:] }
+        var result: [String: String] = [:]
+        for (key, value) in providers {
+            if let s = value as? String, !s.isEmpty { result[key] = s }
+            else if let n = value as? NSNumber { result[key] = n.stringValue }
+        }
+        return result
+    }
+
     // MARK: Vorschaubilder
 
     /// GET /Items/{itemId}?userId=…&fields=Trickplay: welche Vorschaubilder der Server für den Titel hat.

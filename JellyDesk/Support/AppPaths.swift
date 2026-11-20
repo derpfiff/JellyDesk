@@ -37,6 +37,11 @@ enum AppPaths {
         offlineMedia.appendingPathComponent("library.json")
     }
 
+    /// Offene Bewertungs-Antworten (neben der Mediathek, damit sie einen Neustart überleben).
+    static var ratingsFile: URL {
+        offlineMedia.appendingPathComponent("ratings.json")
+    }
+
     static func ensureDirectories() {
         let fm = FileManager.default
         for dir in [offlineMedia, artwork, intros, trickplay] {

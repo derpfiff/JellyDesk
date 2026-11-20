@@ -23,6 +23,7 @@ Ein nativer macOS-Client für [Jellyfin](https://jellyfin.org). Er zeigt die Web
 - **Offline-Player** auf Basis von libmpv: MKV und MP4 mit HEVC, H.264, DTS, TrueHD, E-AC3, eingebetteten und externen Untertiteln. Ton- und Untertitelspur lassen sich wählen; die Wahl wird je Titel gemerkt.
 - **Vorspann wie auf dem Server**: Die App liest die Einstellungen des Plugins „Local Intros“, lädt dessen Intros einmalig und wählt vor jedem Start nach derselben Regel wie das Plugin.
 - **Abgleich des Wiedergabestands**: Offline Gesehenes wird gemeldet, sobald der Server wieder erreichbar ist. Ist der Stand auf dem Server neuer, gilt der.
+- **Bewertung nach dem Film**: Läuft ein Film im eigenen Player zu Ende oder wird ab etwa 90 % geschlossen, erscheint ein Sheet mit halben Sternen, Herz, Datum, „Schon mal gesehen“ und einem Kommentarfeld. Funktioniert auch offline: die Antwort überlebt einen Neustart und geht bei der nächsten Verbindung zum Server als Bewertung, Entdecken-Rückmeldung und – falls dort eingerichtet – Letterboxd-Eintrag raus. Das Sheet folgt der Systemsprache (Deutsch, sonst Englisch).
 
 ## Voraussetzungen
 
@@ -110,6 +111,18 @@ Beim Start, bei jedem Netzwechsel und nach dem Schließen des Players meldet die
 - Gesehen: `POST /UserPlayedItems/{itemId}?userId=…`
 
 Ein Titel gilt erst nach erfolgreicher Antwort als abgeglichen. Die App prüft die Pfade gegen `/api-docs/openapi.json` des Servers und weicht bei älteren Servern auf die früheren Pfade aus; den Befund zeigen die Einstellungen.
+
+## Bewertung nach dem Film
+
+Nach jedem Film im eigenen Player (Download wie Stream) fragt JellyDesk, wie er war – nicht nach Trailern, Folgen oder Mediathek-Titeln. Die Antwort wird lokal in `OfflineMedia/ratings.json` gespeichert und beim nächsten Abgleich in dieser Reihenfolge an den Server gereicht: erst Gesehen-Status, dann Bewertung, dann Letterboxd. „Später“ und „Nicht mehr fragen“ landen ebenfalls im gemeinsamen Cinema-Glass-Zwischenspeicher, sodass die Web-Oberfläche nicht ein zweites Mal fragt.
+
+Dafür nutzt die App drei Server-Schnittstellen:
+
+- `GET /CinemaGlass/config` entscheidet, ob überhaupt gefragt wird (der Stand wird zwischengespeichert, damit es auch offline gilt).
+- `GET`/`POST /DisplayPreferences/cinemaglass-rate?userId=…&client=cinemaglass` hält die gemeinsame „Schon gefragt“-Liste. Die App liest sie vor jedem Zurückschreiben frisch, entfernt Dubletten, kürzt auf die letzten 300 Einträge und setzt `off = "1"` nur, wenn der Nutzer „Nicht mehr fragen“ gewählt hat.
+- `POST /UserItems/{itemId}/UserData` setzt die Jellyfin-Bewertung (1–10, halbe Sterne möglich) und das Herz. Mit TMDb-Kennung kommen `POST /CinemaGlass/discover/feedback` (Rückmeldung an „Entdecken“) und `POST /LetterboxdLog/Entry` (Jellyscribe-Fork) dazu; `GET /LetterboxdLog/Status` vorher zeigt, ob beides eingerichtet ist. Ohne TMDb-Kennung bleibt es bei der Jellyfin-Bewertung.
+
+Die TMDb-Kennung holt die App einmal pro Film über `GET /Items/{id}?fields=ProviderIds` und legt sie neben die Metadaten des Downloads, damit sie offline nicht fehlt.
 
 ## Berechtigungen
 

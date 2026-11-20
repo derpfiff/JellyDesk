@@ -73,6 +73,14 @@ struct OfflineItem: Codable, Identifiable, Equatable {
     /// Der Server wurde nach Vorschaubildern gefragt (auch wenn er keine hat).
     var trickplayChecked: Bool?
 
+    /// TMDb-Kennung aus `ProviderIds.Tmdb` des Jellyfin-Titels (nur für Filme relevant).
+    /// Wird nach dem Download beim Server nachgefragt und hier abgelegt, damit die
+    /// Bewertungs-Frage auch offline eine Rückmeldung an Entdecken/Letterboxd vorbereiten kann.
+    var tmdbId: Int?
+    /// Der Server wurde nach den ProviderIds gefragt (auch wenn er keine liefert); verhindert
+    /// wiederholtes Nachfragen für Titel ohne Treffer.
+    var providerIdsChecked: Bool?
+
     var isOriginal: Bool { quality == "orig" }
     var isEpisode: Bool { itemType == "Episode" }
     var isActive: Bool { state == .queued || state == .downloading }

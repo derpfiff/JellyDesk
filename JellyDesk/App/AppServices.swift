@@ -14,6 +14,7 @@ final class AppServices {
     let intros: IntroLibrary
     let web: WebViewModel
     let streams = StreamSessions()
+    let ratings: RatingStore
 
     private var started = false
 
@@ -24,13 +25,15 @@ final class AppServices {
         let keychain = KeychainStore()
         notices = Notices()
         store = OfflineStore()
+        ratings = RatingStore()
         credentials = CredentialStore(keychain: keychain)
         api = JellyfinAPIService()
         downloads = DownloadManager(store: store, credentials: credentials, keychain: keychain, notices: notices)
         downloads.api = api
         intros = IntroLibrary(store: store, credentials: credentials, api: api)
         downloads.introLibrary = intros
-        sync = ProgressSyncService(store: store, credentials: credentials, api: api, downloads: downloads)
+        sync = ProgressSyncService(store: store, credentials: credentials, api: api,
+                                   downloads: downloads, ratings: ratings, notices: notices)
         sync.introLibrary = intros
         web = WebViewModel(downloads: downloads, notices: notices, store: store, streams: streams)
     }

@@ -17,8 +17,8 @@ settings:
     # "5.0" ist der Sprachmodus Swift 5 (gilt für alle 5.x-Compiler, also auch 5.10).
     SWIFT_VERSION: "5.0"
     MACOSX_DEPLOYMENT_TARGET: "14.0"
-    MARKETING_VERSION: "1.0.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "1.1.0"
+    CURRENT_PROJECT_VERSION: "2"
 
 targets:
   JellyDesk:
