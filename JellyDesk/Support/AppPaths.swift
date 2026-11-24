@@ -60,6 +60,8 @@ enum SettingsKeys {
     static let deviceID = "deviceID"
     static let playerVolume = "playerVolume"
     static let nativeStreaming = "nativeStreaming"
+    /// Qualität für Streams im eigenen Player (siehe `StreamQuality`).
+    static let streamQuality = "streamQuality"
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [

@@ -103,6 +103,10 @@ protocol PlayerEngine: AnyObject {
 
     /// 0…1
     var volume: Double { get set }
+    /// Wiedergabegeschwindigkeit, 1 = normal. Gilt auch für die nächste geladene Datei.
+    var speed: Double { get set }
+    /// Seitenverhältnis des Bildes (Breite / Höhe), sobald bekannt.
+    var videoAspect: CGFloat? { get }
 
     var isFullscreen: Bool { get }
     func setFullscreen(_ on: Bool)

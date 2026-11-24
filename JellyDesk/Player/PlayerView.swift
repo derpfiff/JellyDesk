@@ -47,6 +47,7 @@ private struct PlayerScreen: View {
     @State private var scrubPosition: Double?
     @State private var showAudioMenu = false
     @State private var showSubtitleMenu = false
+    @State private var showSettingsMenu = false
 
     init(itemID: String, services: AppServices) {
         _model = StateObject(wrappedValue: PlayerViewModel(itemID: itemID, store: services.store, sync: services.sync,
@@ -55,15 +56,25 @@ private struct PlayerScreen: View {
     }
 
     private var overlayVisible: Bool {
-        controlsVisible || model.isPaused || showAudioMenu || showSubtitleMenu || scrubPosition != nil
+        controlsVisible || model.isPaused || showAudioMenu || showSubtitleMenu || showSettingsMenu || scrubPosition != nil
     }
 
     var body: some View {
         ZStack {
             Color.black
-            EngineHostView(engine: model.engine)
+            // Im Bild-in-Bild hängt die Ansicht im schwebenden Fenster, nicht hier.
+            EngineHostView(engine: model.isPictureInPicture ? nil : model.engine)
 
-            if let error = model.errorMessage {
+            if model.isPictureInPicture {
+                VStack(spacing: 14) {
+                    Image(systemName: "pip")
+                        .font(.system(size: 40, weight: .light))
+                    Text("Wird im Bild-in-Bild abgespielt.")
+                    Button("Zurück ins Fenster") { model.togglePictureInPicture() }
+                        .buttonStyle(GlassPillButtonStyle())
+                }
+                .foregroundStyle(.white)
+            } else if let error = model.errorMessage {
                 VStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.system(size: 40, weight: .light))
@@ -140,7 +151,8 @@ private struct PlayerScreen: View {
         hideTask?.cancel()
         hideTask = Task {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
-            guard !Task.isCancelled, !model.isPaused, scrubPosition == nil, !showAudioMenu, !showSubtitleMenu else { return }
+            guard !Task.isCancelled, !model.isPaused, scrubPosition == nil, !showAudioMenu, !showSubtitleMenu,
+                  !showSettingsMenu else { return }
             withAnimation(.easeIn(duration: 0.3)) { controlsVisible = false }
             NSCursor.setHiddenUntilMouseMoves(true)
         }
@@ -201,6 +213,15 @@ private struct PlayerScreen: View {
                     Button { showSubtitleMenu.toggle() } label: { Label("Untertitel", systemImage: "captions.bubble") }
                         .help("Untertitel")
                         .popover(isPresented: $showSubtitleMenu, arrowEdge: .top) { subtitleMenu }
+                    Button { showSettingsMenu.toggle() } label: { Label("Wiedergabe-Einstellungen", systemImage: "gearshape") }
+                        .help("Qualität und Geschwindigkeit")
+                        .popover(isPresented: $showSettingsMenu, arrowEdge: .top) { settingsMenu }
+                    if model.canPictureInPicture {
+                        Button { model.togglePictureInPicture() } label: {
+                            Label("Bild-in-Bild", systemImage: model.isPictureInPicture ? "pip.exit" : "pip.enter")
+                        }
+                        .help("Bild-in-Bild (P)")
+                    }
                     Button { model.toggleFullscreen() } label: {
                         Label("Vollbild", systemImage: "arrow.up.left.and.arrow.down.right")
                     }
@@ -244,6 +265,41 @@ private struct PlayerScreen: View {
         }
     }
 
+    private var settingsMenu: some View {
+        TrackMenu(title: "Geschwindigkeit") {
+            ForEach(PlayerViewModel.speeds, id: \.self) { value in
+                TrackRow(text: Self.speedLabel(value), selected: abs(model.speed - value) < 0.001) {
+                    model.setSpeed(value)
+                    showSettingsMenu = false
+                }
+            }
+            MenuHeader(title: "Qualität")
+            if model.canChangeQuality {
+                ForEach(StreamQuality.allCases) { quality in
+                    TrackRow(text: quality.label, selected: quality == model.streamQuality) {
+                        model.selectQuality(quality)
+                        showSettingsMenu = false
+                    }
+                }
+                if model.streamQuality != .original, !model.isTranscoding, model.isLoaded {
+                    TrackRow(text: "Server rechnet nicht um – läuft im Original", selected: false, action: nil)
+                }
+            } else {
+                // Downloads liegen schon fertig vor; Vorspänne und fremde Quellen laufen wie geliefert.
+                TrackRow(text: "Original", selected: true, action: nil)
+            }
+        }
+    }
+
+    private static func speedLabel(_ value: Double) -> String {
+        if value == 1 { return "Normal" }
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "de_DE")
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = 2
+        return (formatter.string(from: NSNumber(value: value)) ?? "\(value)") + "×"
+    }
+
     private var subtitleMenu: some View {
         TrackMenu(title: "Untertitel") {
             TrackRow(text: "Aus", selected: model.selectedSubtitleTrackID == nil) {
@@ -267,22 +323,32 @@ private struct TrackMenu<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title.uppercased())
-                .font(.system(size: 11, weight: .bold))
-                .kerning(0.6)
-                .foregroundStyle(Theme.text3)
-                .padding(.horizontal, 12)
-                .padding(.top, 10)
-                .padding(.bottom, 4)
+            MenuHeader(title: title)
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) { content }
             }
-            .frame(maxHeight: 320)
+            .frame(maxHeight: 480)
         }
         .padding(6)
         .frame(minWidth: 260, maxWidth: 380)
         .background(Theme.surface)
         .preferredColorScheme(.dark)
+    }
+}
+
+/// Überschrift eines Abschnitts in diesen Menüs.
+private struct MenuHeader: View {
+    let title: String
+
+    var body: some View {
+        Text(title.uppercased())
+            .font(.system(size: 11, weight: .bold))
+            .kerning(0.6)
+            .foregroundStyle(Theme.text3)
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+            .accessibilityAddTraits(.isHeader)
     }
 }
 

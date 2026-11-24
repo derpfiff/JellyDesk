@@ -276,6 +276,10 @@ actor JellyfinAPIService {
         let title: String?
         /// Bei externen Untertiteln: Adresse relativ zum Server.
         let deliveryPath: String?
+        /// Wie der Server einen Untertitel liefert: „External“, „Embed“, „Encode“ (eingebrannt) …
+        let deliveryMethod: String?
+        let channels: Int?
+        let isForced: Bool
     }
 
     /// Was der Server über die Datei eines Titels sagt.
@@ -289,6 +293,16 @@ actor JellyfinAPIService {
         let defaultSubtitleIndex: Int?
         /// Liegt die Datei nicht auf dem Server (Kanäle, z. B. eine Mediathek), nennt er hier ihre Adresse.
         let remoteURL: URL?
+        /// Bei einer Umrechnung: Adresse der HLS-Wiedergabeliste, relativ zum Server.
+        let transcodingPath: String?
+    }
+
+    /// Wunsch an den Server, den Titel kleiner zu rechnen (Qualität im Player).
+    struct TranscodeRequest: Sendable {
+        let maxBitrate: Int
+        /// Spurnummern in der Zählung des Servers; nil: wie der Server es vorsieht, -1 bei Untertiteln: aus.
+        let audioStreamIndex: Int?
+        let subtitleStreamIndex: Int?
     }
 
     enum PlaybackReport: String, Sendable {
@@ -298,8 +312,12 @@ actor JellyfinAPIService {
     }
 
     /// POST /Items/{itemId}/PlaybackInfo: Die App spielt jede Datei selbst ab und fragt deshalb
-    /// nur nach den Quellen, nicht nach einer Umrechnung.
-    func playbackSource(server: URL, itemId: String, userId: String, token: String, mediaSourceId: String?) async throws -> PlaybackSource {
+    /// nur nach den Quellen, nicht nach einer Umrechnung – außer mit `transcode`: dann rechnet der
+    /// Server auf die gewünschte Bitrate herunter und liefert HLS (H.264/HEVC, AAC/AC3).
+    /// Text-Untertitel kommen dabei als eigene Datei, Bild-Untertitel brennt der Server ein.
+    func playbackSource(server: URL, itemId: String, userId: String, token: String, mediaSourceId: String?,
+                        transcode: TranscodeRequest? = nil) async throws -> PlaybackSource {
+        let textSubtitles = ["srt", "subrip", "ass", "ssa", "vtt", "webvtt", "sub", "smi", "ttml", "mov_text"]
         var body: [String: Any] = [
             "UserId": userId,
             "EnableDirectPlay": true,
@@ -316,6 +334,28 @@ actor JellyfinAPIService {
             ] as [String: Any],
         ]
         if let mediaSourceId { body["MediaSourceId"] = mediaSourceId }
+        if let transcode {
+            body["EnableDirectPlay"] = false
+            body["EnableDirectStream"] = false
+            body["EnableTranscoding"] = true
+            body["AllowVideoStreamCopy"] = true
+            body["AllowAudioStreamCopy"] = true
+            body["MaxStreamingBitrate"] = transcode.maxBitrate
+            if let audio = transcode.audioStreamIndex { body["AudioStreamIndex"] = audio }
+            if let subtitle = transcode.subtitleStreamIndex { body["SubtitleStreamIndex"] = subtitle }
+            body["DeviceProfile"] = [
+                "Name": "JellyDesk",
+                "MaxStreamingBitrate": transcode.maxBitrate,
+                "DirectPlayProfiles": [[String: Any]](),
+                "TranscodingProfiles": [[
+                    "Type": "Video", "Container": "ts", "Protocol": "hls", "Context": "Streaming",
+                    "VideoCodec": "h264,hevc", "AudioCodec": "aac,ac3,eac3,mp3", "MaxAudioChannels": "6",
+                    "MinSegments": 1, "BreakOnNonKeyFrames": true,
+                ] as [String: Any]],
+                "SubtitleProfiles": textSubtitles.map { ["Format": $0, "Method": "External"] }
+                    + ["pgs", "pgssub", "dvdsub", "dvbsub"].map { ["Format": $0, "Method": "Encode"] },
+            ] as [String: Any]
+        }
         let data = try await send(request(server: server, path: "Items/\(itemId)/PlaybackInfo",
                                           query: [URLQueryItem(name: "userId", value: userId)], method: "POST", token: token, json: body))
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -331,7 +371,10 @@ actor JellyfinAPIService {
                                codec: (stream["Codec"] as? String) ?? "",
                                language: stream["Language"] as? String,
                                title: (stream["Title"] as? String) ?? (stream["DisplayTitle"] as? String),
-                               deliveryPath: stream["DeliveryUrl"] as? String)
+                               deliveryPath: stream["DeliveryUrl"] as? String,
+                               deliveryMethod: stream["DeliveryMethod"] as? String,
+                               channels: (stream["Channels"] as? NSNumber)?.intValue,
+                               isForced: (stream["IsForced"] as? Bool) ?? false)
         }
         var remote: URL?
         if (source["Protocol"] as? String) == "Http", (source["IsRemote"] as? Bool) == true,
@@ -346,7 +389,8 @@ actor JellyfinAPIService {
             tracks: tracks,
             defaultAudioIndex: (source["DefaultAudioStreamIndex"] as? NSNumber)?.intValue,
             defaultSubtitleIndex: (source["DefaultSubtitleStreamIndex"] as? NSNumber)?.intValue,
-            remoteURL: remote)
+            remoteURL: remote,
+            transcodingPath: transcode == nil ? nil : (source["TranscodingUrl"] as? String).flatMap { $0.isEmpty ? nil : $0 })
     }
 
     /// Adresse der unveränderten Datei: GET /Videos/{itemId}/stream?static=true
@@ -365,7 +409,8 @@ actor JellyfinAPIService {
     /// Meldet Beginn, Stand oder Ende einer Wiedergabe. Der Server führt damit „Weiterschauen“
     /// und den Gesehen-Status selbst, wie bei jedem anderen Client.
     func report(_ kind: PlaybackReport, server: URL, token: String, itemId: String, mediaSourceId: String,
-                playSessionId: String, positionTicks: Int64, isPaused: Bool, volume: Double) async {
+                playSessionId: String, positionTicks: Int64, isPaused: Bool, volume: Double,
+                transcoding: Bool = false, speed: Double = 1) async {
         var body: [String: Any] = [
             "ItemId": itemId,
             "MediaSourceId": mediaSourceId,
@@ -374,7 +419,8 @@ actor JellyfinAPIService {
             "IsMuted": volume <= 0,
             "VolumeLevel": Int((min(1, max(0, volume)) * 100).rounded()),
             "CanSeek": true,
-            "PlayMethod": "DirectPlay",
+            "PlayMethod": transcoding ? "Transcode" : "DirectPlay",
+            "PlaybackRate": speed,
         ]
         if !playSessionId.isEmpty { body["PlaySessionId"] = playSessionId }
         _ = try? await send(request(server: server, path: kind.rawValue, method: "POST", token: token, json: body))

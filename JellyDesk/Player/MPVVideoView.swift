@@ -134,7 +134,7 @@ final class MPVVideoView: NSView {
     /// Die Fenstergröße hat sich beruhigt und weicht von der gerenderten Größe ab.
     var onNeedsRefit: (() -> Void)?
 
-    private var aspect: CGFloat = 16.0 / 9.0
+    private(set) var aspect: CGFloat = 16.0 / 9.0
     /// Pixelmaße der Zeichenfläche, wie zuletzt festgelegt oder angekündigt.
     private var renderPixels = CGSize(width: 1920, height: 1080)
     private var refitCheck: DispatchWorkItem?

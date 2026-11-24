@@ -318,6 +318,15 @@ final class MPVPlayerEngine: PlayerEngine {
         }
     }
 
+    var speed: Double = 1 {
+        didSet {
+            speed = min(4, max(0.25, speed))
+            core?.setAsync("speed", String(format: "%.3f", speed))
+        }
+    }
+
+    var videoAspect: CGFloat? { loaded ? videoView.aspect : nil }
+
     /// `hdrDisplay`: der Bildschirm, auf dem das Fenster erscheint, kann HDR (EDR) darstellen.
     init(hdrDisplay: Bool) {
         guard let core = MPVCore() else { return }

@@ -6,6 +6,42 @@ extension Notification.Name {
     static let jellyDeskWillTerminate = Notification.Name("JellyDeskWillTerminate")
 }
 
+/// Qualität für Streams: die Datei unverändert oder vom Server auf eine Bitrate heruntergerechnet.
+/// Die Stufen entsprechen denen des Web-Players; die Auflösung wählt der Server passend zur Bitrate.
+enum StreamQuality: String, CaseIterable, Identifiable {
+    case original = "orig"
+    case p1080High = "1080-20"
+    case p1080 = "1080-10"
+    case p720 = "720-4"
+    case p480 = "480-1.5"
+
+    var id: String { rawValue }
+
+    var maxBitrate: Int? {
+        switch self {
+        case .original: return nil
+        case .p1080High: return 20_000_000
+        case .p1080: return 10_000_000
+        case .p720: return 4_000_000
+        case .p480: return 1_500_000
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .original: return "Original"
+        case .p1080High: return "1080p – 20 Mbit/s"
+        case .p1080: return "1080p – 10 Mbit/s"
+        case .p720: return "720p – 4 Mbit/s"
+        case .p480: return "480p – 1,5 Mbit/s"
+        }
+    }
+
+    static var saved: StreamQuality {
+        UserDefaults.standard.string(forKey: SettingsKeys.streamQuality).flatMap(StreamQuality.init(rawValue:)) ?? .original
+    }
+}
+
 /// Steuert die Wiedergabe im eigenen Player.
 ///
 /// Downloads: spielt beim Start von vorn zuerst den Vorspann, wählt den Player nach Container,
@@ -38,6 +74,14 @@ final class PlayerViewModel: ObservableObject {
     /// Für den gerade laufenden Film liegt eine Bewertungs-Frage vor; die Oberfläche zeigt
     /// dann das Sheet. Wird gesetzt, sobald der Film zu Ende ist oder ~90 % erreicht wurden.
     @Published var pendingRatingPrompt: RatingContext?
+    /// Wiedergabegeschwindigkeit, 1 = normal. Gilt für das Fenster, auch über Titelwechsel hinweg.
+    @Published private(set) var speed: Double = 1
+    /// Gewählte Qualität für Streams; Downloads und Vorspänne laufen immer im Original.
+    @Published private(set) var streamQuality: StreamQuality = .saved
+    /// Der laufende Titel kommt umgerechnet vom Server (HLS), nicht als Originaldatei.
+    @Published private(set) var isTranscoding = false
+    /// Das Bild läuft gerade im Bild-in-Bild-Fenster.
+    @Published private(set) var isPictureInPicture = false
     @Published var volume: Double {
         didSet {
             engine?.volume = volume
@@ -67,6 +111,19 @@ final class PlayerViewModel: ObservableObject {
     private var streamReported = false
     private var lastReportedPause: Bool?
 
+    /// Spurwahl in der Zählung des Servers, die beim nächsten Laden des laufenden Titels gilt
+    /// (nach einem Wechsel der Qualität oder einer Spur während der Umrechnung). Untertitel -1: aus.
+    private var overrideAudioIndex: Int?
+    private var overrideSubtitleIndex: Int?
+    /// Spuren, mit denen der Server gerade umrechnet.
+    private var activeAudioIndex: Int?
+    private var activeSubtitleIndex: Int?
+
+    private let pictureInPicture = PictureInPicture()
+    private var fullscreenExitObserver: NSObjectProtocol?
+
+    static let speeds: [Double] = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]
+
     private var introQueue: [URL] = []
     private var mainKind = PlayerEngineKind.mpv
     private var mainHeadline = ""
@@ -94,6 +151,10 @@ final class PlayerViewModel: ObservableObject {
         self.ratings = ratings
         self.credentials = credentials
         self.volume = UserDefaults.standard.double(forKey: SettingsKeys.playerVolume)
+        pictureInPicture.onPlay = { [weak self] in self?.engine?.play() }
+        pictureInPicture.onPause = { [weak self] in self?.engine?.pause() }
+        pictureInPicture.onStop = { [weak self] in self?.engine?.pause() }
+        pictureInPicture.onDidClose = { [weak self] in self?.isPictureInPicture = false }
     }
 
     // MARK: Start und Ende
@@ -208,6 +269,8 @@ final class PlayerViewModel: ObservableObject {
         duration = fallbackDuration
 
         if engine?.kind != kind {
+            // Die Ansicht des alten Players gehört zurück ins Fenster, bevor er verschwindet.
+            if pictureInPicture.isActive { pictureInPicture.stop() }
             engine?.shutdown()
             let newEngine: PlayerEngine
             switch kind {
@@ -221,6 +284,7 @@ final class PlayerViewModel: ObservableObject {
             }
             newEngine.delegate = self
             newEngine.volume = volume
+            newEngine.speed = speed
             engine = newEngine
         }
         engine?.setHTTPHeaders(headers)
@@ -249,12 +313,19 @@ final class PlayerViewModel: ObservableObject {
         return stream.items[stream.startIndex...].firstIndex { !$0.isIntro } ?? stream.startIndex
     }
 
-    private func playStream(at index: Int) {
+    /// `resumeAt`: denselben Titel neu laden (andere Qualität oder Spur) und dort fortsetzen.
+    private func playStream(at index: Int, resumeAt: TimeInterval? = nil) {
         guard let stream else { return }
         guard index < stream.items.count else {
             // Warteschlange zu Ende: wie im Web-Player zurück zur Oberfläche.
-            engine?.view.window?.close()
+            let window = pictureInPicture.isActive ? pictureInPicture.playerWindow : engine?.view.window
+            pictureInPicture.stop()
+            window?.close()
             return
+        }
+        if resumeAt == nil {
+            overrideAudioIndex = nil
+            overrideSubtitleIndex = nil
         }
         streamIndex = index
         streamSource = nil
@@ -279,7 +350,9 @@ final class PlayerViewModel: ObservableObject {
         subline = item.isIntro ? mainHeadline : mainSubline
 
         var startAt: TimeInterval = 0
-        if isFirstMain, !item.isIntro {
+        if let resumeAt {
+            startAt = max(0, resumeAt)
+        } else if isFirstMain, !item.isIntro {
             let wanted = Ticks.seconds(stream.startPositionTicks)
             startAt = item.duration > 0 && wanted / item.duration > 0.95 ? 0 : (wanted < 1 ? 0 : wanted)
         }
@@ -290,15 +363,39 @@ final class PlayerViewModel: ObservableObject {
 
         let api = self.api
         let token = stream.accessToken
+        let bitrate = item.isIntro ? nil : streamQuality.maxBitrate
+        let wantedAudio = overrideAudioIndex ?? (isFirstMain ? stream.audioStreamIndex : nil)
+        let wantedSubtitle = overrideSubtitleIndex ?? (isFirstMain ? stream.subtitleStreamIndex : nil)
         Task { [weak self] in
-            let source = try? await api.playbackSource(server: stream.serverUrl, itemId: item.itemId, userId: stream.userId,
-                                                       token: token, mediaSourceId: isFirstMain ? stream.mediaSourceId : nil)
+            let requestedSourceId = isFirstMain ? stream.mediaSourceId : nil
+            var source: JellyfinAPIService.PlaybackSource?
+            var transcodeURL: URL?
+            if let bitrate {
+                // Kleiner gerechnet vom Server. Klappt das nicht (oder liegt die Datei gar nicht auf dem
+                // Server), läuft das Original.
+                let request = JellyfinAPIService.TranscodeRequest(maxBitrate: bitrate, audioStreamIndex: wantedAudio,
+                                                                  subtitleStreamIndex: wantedSubtitle)
+                if let transcoded = try? await api.playbackSource(server: stream.serverUrl, itemId: item.itemId, userId: stream.userId,
+                                                                  token: token, mediaSourceId: requestedSourceId, transcode: request),
+                   transcoded.remoteURL == nil, let path = transcoded.transcodingPath,
+                   let url = Self.serverURL(path, base: stream.serverUrl), url.hasSameOrigin(as: stream.serverUrl) {
+                    source = transcoded
+                    transcodeURL = url
+                }
+            }
+            if source == nil {
+                source = try? await api.playbackSource(server: stream.serverUrl, itemId: item.itemId, userId: stream.userId,
+                                                       token: token, mediaSourceId: requestedSourceId)
+            }
             guard let self, !self.closed, self.streamLoad == number else { return }
             self.streamSource = source
+            self.isTranscoding = transcodeURL != nil
+            self.activeAudioIndex = transcodeURL == nil ? nil : (wantedAudio ?? source?.defaultAudioIndex)
+            self.activeSubtitleIndex = transcodeURL == nil ? nil : (wantedSubtitle ?? source?.defaultSubtitleIndex)
             let mediaSourceId = source?.mediaSourceId ?? item.itemId
             // Dateien außerhalb des Servers holt die App unter der genannten Adresse; über den Server gereicht ließe
             // sich darin nicht springen.
-            guard let url = source?.remoteURL ?? JellyfinAPIService.streamURL(
+            guard let url = transcodeURL ?? source?.remoteURL ?? JellyfinAPIService.streamURL(
                 server: stream.serverUrl, itemId: item.itemId, mediaSourceId: mediaSourceId,
                 playSessionId: source?.playSessionId ?? "") else {
                 self.errorMessage = "Die Adresse des Titels ließ sich nicht bilden."
@@ -325,8 +422,22 @@ final class PlayerViewModel: ObservableObject {
         guard let stream, let engine, let source = streamSource, !isIntro else { return }
         let item = stream.items[streamIndex]
         let isFirstMain = streamIndex == firstMainIndex
-        let wantedAudio = (isFirstMain ? stream.audioStreamIndex : nil) ?? source.defaultAudioIndex
-        let wantedSubtitle = (isFirstMain ? stream.subtitleStreamIndex : nil) ?? source.defaultSubtitleIndex
+
+        if isTranscoding {
+            // Der Server liefert genau die gewählte Tonspur; Bild-Untertitel sind eingebrannt, Text-Untertitel
+            // kommen als eigene Datei.
+            engine.selectSubtitleTrack(id: nil)
+            if let wanted = activeSubtitleIndex, wanted >= 0,
+               let track = source.tracks.first(where: { !$0.isAudio && $0.index == wanted }),
+               track.deliveryMethod == "External", let path = track.deliveryPath,
+               let url = Self.serverURL(path, base: stream.serverUrl), url.hasSameOrigin(as: stream.serverUrl) {
+                engine.addSubtitle(url: url, title: track.title, language: track.language, select: true)
+            }
+            return
+        }
+
+        let wantedAudio = overrideAudioIndex ?? (isFirstMain ? stream.audioStreamIndex : nil) ?? source.defaultAudioIndex
+        let wantedSubtitle = overrideSubtitleIndex ?? (isFirstMain ? stream.subtitleStreamIndex : nil) ?? source.defaultSubtitleIndex
 
         // mpv zählt die Spuren je Art ab 1 in der Reihenfolge der Datei; der Server zählt alle
         // Spuren gemeinsam. Entscheidend ist deshalb der Platz unter den Spuren derselben Art.
@@ -347,11 +458,16 @@ final class PlayerViewModel: ObservableObject {
         for track in source.tracks where !track.isAudio && track.isExternal {
             let path = track.deliveryPath
                 ?? "/Videos/\(item.itemId)/\(source.mediaSourceId)/Subtitles/\(track.index)/0/Stream.\(track.codec.isEmpty ? "srt" : track.codec)"
-            let base = stream.serverUrl.absoluteString.hasSuffix("/") ? String(stream.serverUrl.absoluteString.dropLast()) : stream.serverUrl.absoluteString
-            guard let url = URL(string: path.hasPrefix("http") ? path : base + (path.hasPrefix("/") ? path : "/" + path)),
-                  url.hasSameOrigin(as: stream.serverUrl) else { continue }
+            guard let url = Self.serverURL(path, base: stream.serverUrl), url.hasSameOrigin(as: stream.serverUrl) else { continue }
             engine.addSubtitle(url: url, title: track.title, language: track.language, select: track.index == chosen?.index)
         }
+    }
+
+    /// Eine Adresse, die der Server relativ zu sich nennt (Untertitel, HLS-Wiedergabeliste).
+    private static func serverURL(_ path: String, base: URL) -> URL? {
+        if path.hasPrefix("http://") || path.hasPrefix("https://") { return URL(string: path) }
+        let root = base.absoluteString.hasSuffix("/") ? String(base.absoluteString.dropLast()) : base.absoluteString
+        return URL(string: root + (path.hasPrefix("/") ? path : "/" + path))
     }
 
     private func reportStream(_ kind: JellyfinAPIService.PlaybackReport, position override: TimeInterval? = nil) {
@@ -366,10 +482,13 @@ final class PlayerViewModel: ObservableObject {
         let paused = engine?.isPaused ?? true
         lastReportedPause = paused
         let level = volume
+        let transcoding = isTranscoding
+        let rate = speed
         streams.track {
             await api.report(kind, server: stream.serverUrl, token: stream.accessToken, itemId: item.itemId,
                              mediaSourceId: source?.mediaSourceId ?? item.itemId, playSessionId: source?.playSessionId ?? "",
-                             positionTicks: Ticks.from(seconds: seconds.isFinite ? seconds : 0), isPaused: paused, volume: level)
+                             positionTicks: Ticks.from(seconds: seconds.isFinite ? seconds : 0), isPaused: paused, volume: level,
+                             transcoding: transcoding, speed: rate)
         }
     }
 
@@ -383,6 +502,9 @@ final class PlayerViewModel: ObservableObject {
     func close() {
         guard !closed else { return }
         closed = true
+        pictureInPicture.stop()
+        if let fullscreenExitObserver { NotificationCenter.default.removeObserver(fullscreenExitObserver) }
+        fullscreenExitObserver = nil
         if stream != nil {
             reportStream(.stopped)
             streams.discard(itemID)
@@ -561,8 +683,100 @@ final class PlayerViewModel: ObservableObject {
     }
 
     func toggleFullscreen() {
-        guard let engine else { return }
+        // Im Bild-in-Bild gehört die Ansicht nicht zum Player-Fenster.
+        guard let engine, !pictureInPicture.isActive else { return }
         engine.setFullscreen(!engine.isFullscreen)
+    }
+
+    // MARK: Geschwindigkeit, Qualität, Bild-in-Bild
+
+    func setSpeed(_ value: Double) {
+        speed = min(4, max(0.25, value))
+        engine?.speed = speed
+        updateNowPlaying()
+        if stream != nil, isLoaded, streamReported { reportStream(.progress) }
+    }
+
+    /// Ob sich die Qualität für den laufenden Titel wählen lässt: nur bei Streams vom eigenen Server.
+    var canChangeQuality: Bool {
+        stream != nil && !isIntro && streamSource?.remoteURL == nil
+    }
+
+    /// Merkt sich die Wahl (gilt auch für folgende Titel und Fenster) und lädt den laufenden Titel
+    /// in der neuen Qualität an derselben Stelle neu.
+    func selectQuality(_ quality: StreamQuality) {
+        guard quality != streamQuality else { return }
+        streamQuality = quality
+        UserDefaults.standard.set(quality.rawValue, forKey: SettingsKeys.streamQuality)
+        guard canChangeQuality, isLoaded else { return }
+        rememberCurrentTracks()
+        reloadCurrentStream()
+    }
+
+    /// Hält die gerade gewählten Spuren in der Zählung des Servers fest, damit sie nach dem Neuladen
+    /// wieder gelten.
+    private func rememberCurrentTracks() {
+        guard let source = streamSource else { return }
+        if isTranscoding {
+            overrideAudioIndex = activeAudioIndex
+            overrideSubtitleIndex = activeSubtitleIndex ?? -1
+            return
+        }
+        guard let engine else { return }
+        let audio = source.tracks.filter { $0.isAudio && !$0.isExternal }.sorted { $0.index < $1.index }
+        if let id = engine.selectedAudioTrackID, audio.indices.contains(id - 1) {
+            overrideAudioIndex = audio[id - 1].index
+        }
+        guard let id = engine.selectedSubtitleTrackID,
+              let selected = engine.subtitleTracks.first(where: { $0.id == id }) else {
+            overrideSubtitleIndex = -1
+            return
+        }
+        if selected.isExternal {
+            overrideSubtitleIndex = source.tracks.first { !$0.isAudio && $0.isExternal && $0.title == selected.title }?.index
+        } else {
+            let subtitles = source.tracks.filter { !$0.isAudio && !$0.isExternal }.sorted { $0.index < $1.index }
+            overrideSubtitleIndex = subtitles.indices.contains(id - 1) ? subtitles[id - 1].index : nil
+        }
+    }
+
+    private func reloadCurrentStream() {
+        let at = engine?.position ?? position
+        // Der Server beendet damit auch eine laufende Umrechnung.
+        reportStream(.stopped)
+        playStream(at: streamIndex, resumeAt: at)
+    }
+
+    var canPictureInPicture: Bool { PictureInPicture.isAvailable && engine != nil && isLoaded }
+
+    func togglePictureInPicture() {
+        if pictureInPicture.isActive {
+            pictureInPicture.stop()
+            return
+        }
+        guard let engine, PictureInPicture.isAvailable else { return }
+        if engine.isFullscreen, let window = engine.view.window {
+            // Erst aus dem Vollbild heraus, sonst bliebe ein leerer Vollbild-Space zurück.
+            fullscreenExitObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if let observer = self.fullscreenExitObserver { NotificationCenter.default.removeObserver(observer) }
+                    self.fullscreenExitObserver = nil
+                    self.enterPictureInPicture()
+                }
+            }
+            engine.setFullscreen(false)
+            return
+        }
+        enterPictureInPicture()
+    }
+
+    private func enterPictureInPicture() {
+        guard let engine, !closed, !pictureInPicture.isActive else { return }
+        pictureInPicture.start(view: engine.view, aspect: engine.videoAspect, playing: !engine.isPaused)
+        isPictureInPicture = pictureInPicture.isActive
     }
 
     func toggleMute() {
@@ -575,6 +789,14 @@ final class PlayerViewModel: ObservableObject {
     }
 
     func selectAudio(_ track: MediaTrack) {
+        if isTranscoding {
+            // Während der Umrechnung zählen die Spuren des Servers; er rechnet mit der neuen Spur neu.
+            guard track.id != activeAudioIndex else { return }
+            overrideAudioIndex = track.id
+            overrideSubtitleIndex = activeSubtitleIndex ?? -1
+            reloadCurrentStream()
+            return
+        }
         engine?.selectAudioTrack(id: track.id)
         guard !isIntro, stream == nil else { return }
         store.update(itemID) {
@@ -584,6 +806,14 @@ final class PlayerViewModel: ObservableObject {
 
     /// nil schaltet die Untertitel aus.
     func selectSubtitle(_ track: MediaTrack?) {
+        if isTranscoding {
+            let wanted = track?.id ?? -1
+            guard wanted != (activeSubtitleIndex ?? -1) else { return }
+            overrideAudioIndex = activeAudioIndex
+            overrideSubtitleIndex = wanted
+            reloadCurrentStream()
+            return
+        }
         engine?.selectSubtitleTrack(id: track?.id)
         guard !isIntro, stream == nil else { return }
         store.update(itemID) {
@@ -633,6 +863,7 @@ final class PlayerViewModel: ObservableObject {
             case 125: self.volume = max(0, self.volume - 0.05)            // Pfeil runter
             case 3: self.toggleFullscreen()                               // F
             case 46: self.toggleMute()                                    // M
+            case 35: self.togglePictureInPicture()                        // P
             case 53:                                                      // Esc
                 guard self.engine?.isFullscreen == true else { return event }
                 self.toggleFullscreen()
@@ -680,7 +911,8 @@ final class PlayerViewModel: ObservableObject {
             MPMediaItemPropertyTitle: windowTitle,
             MPMediaItemPropertyPlaybackDuration: duration,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: position,
-            MPNowPlayingInfoPropertyPlaybackRate: isPaused ? 0.0 : 1.0,
+            MPNowPlayingInfoPropertyPlaybackRate: isPaused ? 0.0 : speed,
+            MPNowPlayingInfoPropertyDefaultPlaybackRate: speed,
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.video.rawValue,
         ]
         center.playbackState = isPaused ? .paused : .playing
@@ -705,10 +937,24 @@ final class PlayerViewModel: ObservableObject {
 extension PlayerViewModel: PlayerEngineDelegate {
     private func refreshState(from engine: PlayerEngine) {
         isPaused = engine.isPaused
-        audioTracks = engine.audioTracks
-        subtitleTracks = engine.subtitleTracks
-        selectedAudioTrackID = engine.selectedAudioTrackID
-        selectedSubtitleTrackID = engine.selectedSubtitleTrackID
+        pictureInPicture.setPlaying(!isPaused)
+        if isTranscoding, let source = streamSource {
+            // In der HLS-Fassung steckt nur die eine gewählte Tonspur; das Menü zeigt deshalb die Spuren
+            // des Servers, und eine andere Wahl lässt ihn neu rechnen.
+            func track(_ t: JellyfinAPIService.StreamTrack) -> MediaTrack {
+                MediaTrack(id: t.index, kind: t.isAudio ? .audio : .subtitle, title: t.title, language: t.language,
+                           codec: t.codec, channels: t.channels, isExternal: t.isExternal, isForced: t.isForced)
+            }
+            audioTracks = source.tracks.filter(\.isAudio).map(track)
+            subtitleTracks = source.tracks.filter { !$0.isAudio }.map(track)
+            selectedAudioTrackID = activeAudioIndex
+            selectedSubtitleTrackID = (activeSubtitleIndex ?? -1) >= 0 ? activeSubtitleIndex : nil
+        } else {
+            audioTracks = engine.audioTracks
+            subtitleTracks = engine.subtitleTracks
+            selectedAudioTrackID = engine.selectedAudioTrackID
+            selectedSubtitleTrackID = engine.selectedSubtitleTrackID
+        }
         if isPaused { allowSleep() } else { preventSleep() }
         updateNowPlaying()
     }
@@ -718,6 +964,7 @@ extension PlayerViewModel: PlayerEngineDelegate {
         // Das Player-Fenster soll beim nächsten App-Start nicht von selbst wieder aufgehen.
         engine.view.window?.isRestorable = false
         isLoaded = true
+        pictureInPicture.setAspect(engine.videoAspect)
         duration = engine.duration
         position = engine.position
         applyStoredPreferences()

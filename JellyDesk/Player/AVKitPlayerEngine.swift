@@ -13,6 +13,7 @@ final class AVKitPlayerEngine: NSObject, PlayerEngine {
         let view = AVPlayerView(frame: NSRect(x: 0, y: 0, width: 960, height: 540))
         view.controlsStyle = .none          // Bedienung kommt von der App
         view.videoGravity = .resizeAspect
+        // Bild-in-Bild steuert die App selbst (PictureInPicture), für beide Player gleich.
         view.allowsPictureInPicturePlayback = false
         view.autoresizingMask = [.width, .height]
         return view
@@ -45,6 +46,20 @@ final class AVKitPlayerEngine: NSObject, PlayerEngine {
             volume = min(1, max(0, volume))
             player.volume = Float(volume)
         }
+    }
+
+    var speed: Double = 1 {
+        didSet {
+            speed = min(4, max(0.25, speed))
+            // defaultRate gilt für jedes play(); läuft schon etwas, gleich umstellen.
+            player.defaultRate = Float(speed)
+            if player.rate != 0 { player.rate = Float(speed) }
+        }
+    }
+
+    var videoAspect: CGFloat? {
+        guard let size = item?.presentationSize, size.width > 0, size.height > 0 else { return nil }
+        return size.width / size.height
     }
 
     override init() {
